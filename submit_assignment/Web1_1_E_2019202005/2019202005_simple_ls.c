@@ -50,22 +50,13 @@ void bubble_sort(char**files,int n){
 //////////////////////////////////////////////////////////
 
 int main(int argc, char* argv[]) {
-    FILE *file=fopen("simple_ls.html","w");
-    if(file==0)
-    {
-        fprintf(file,"error\n");
-        return -1;
-    }
-
     DIR* dirp;//pointer to directory stream
     struct dirent* entry;//Pointer to a dirent structure
     char* file_name[1000];// Array to store file names
     int i, n , j = 0;
 
     char* dirp_path;//diretory path
-    char path[1024];
-    getcwd(path,1024);
-    fprintf(file, "<body><h1>%s</h1>\n", path);
+    
     if (argc == 2)
     {
         dirp_path = argv[1];//path is file received as argument
@@ -76,7 +67,7 @@ int main(int argc, char* argv[]) {
     }//end of else if
     else
     {
-	    fprintf(file,"simple_ls: only one directory path can be processed\n");//When more than one file path is entered
+	    printf("simple_ls: only one directory path can be processed\n");//When more than one file path is entered
 	    return 0;
     }
 
@@ -91,21 +82,18 @@ int main(int argc, char* argv[]) {
         n = i; //number of files in the array
 
         bubble_sort(file_name,n);//call bubble_sort function
-        
-        fprintf(file,"<table border=\"1\">\n");
-        fprintf(file,"<tr><th>File Name</th></tr>\n");
 
         for (i = 0; i < n; i++)
         {
-            fprintf(file,"<tr><th>%s</th></tr>\n", file_name[i]);//print the sorted directory or file
+            printf("%s\n", file_name[i]);//print the sorted directory or file
         }//end of for
-        fprintf(file,"</body>");
+     
     }//end of if
     else
     {
-        fprintf(file,"simple_ls:cannot access \'%s\' :no such directory\n",argv[1]);//If a file is entered rather than a directory & If a directory that does not exist is entered
+        printf("simple_ls:cannot access %s :no such directory\n",argv[1]);//If a file is entered rather than a directory & If a directory that does not exist is entered
         return 0;
     }//end of else
-    fclose(file);
+
     return 0;
 }
