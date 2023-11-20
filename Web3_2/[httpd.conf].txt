@@ -1,0 +1,13 @@
+[httpd.conf]
+MaxChilds: 10
+MaxIdleNum: 6
+MinIdleNum: 4
+StartServers: 5
+MaxHistory: 10
+
+파일로 만들어서 읽어온 다음 파싱
+
+linked list
+
+terminate부분 idle_count랑 pid
+

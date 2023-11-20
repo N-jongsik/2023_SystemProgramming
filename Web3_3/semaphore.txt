@@ -1,0 +1,1025 @@
+//////////////////////////////////////////////////////////////////////
+//File:2019202005_semaphore_server.c                                //
+//Date:2023/05/31                                                   //
+//OS:Ubuntu 16.04 LTS 64bits                                        //
+//Author:Nam jongsik                                                //
+//Student ID:2019202005                                             //
+//-----------------------------------------------------             //
+//Title:system programming assignment #3-3                          //
+//Description:Implementing log file program       	                //
+//////////////////////////////////////////////////////////////////////
+#define _GNU_SOURCE
+#include <stdio.h>
+#include <stdlib.h>
+#include <dirent.h>
+#include <string.h>
+#include <unistd.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <pwd.h>
+#include <grp.h>
+#include <time.h>
+#include <fnmatch.h>
+#include <arpa/inet.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <fcntl.h>
+#include <sys/wait.h>
+#include <signal.h>
+#include <pthread.h>
+#include <sys/ipc.h>
+#include <sys/shm.h>
+#include <sys/time.h>
+#include <semaphore.h>
+
+#define URL_LEN 256
+#define BUFSIZE 1024
+#define PORTNO 40000
+#define MEM_SIZE 10240
+
+struct HttpdConfig {
+    int MaxChilds;
+    int MaxIdleNum;
+    int MinIdleNum;
+    int StartServers;
+    int MaxHistory;
+};
+
+struct HttpdConfig config;
+
+#define KEY_VALUE 40000
+
+int shm_id;
+void *shm_addr;
+int* idle_count;
+
+int shm_id1;
+void *shm_addr1;
+struct client_info *share_history;
+
+FILE* logfile;
+
+sem_t *semaphore;
+
+pthread_t tidA;
+
+pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;//mutex initialize
+
+char temp[BUFSIZE*BUFSIZE] = {
+    0,
+}; // temporary store response message
+
+void file_info(int lfalg, int aflag, char *argv, int k, struct stat buf[], char *file[]); // define file info function
+void bubble_sort(char **file, int n, struct stat buf[]);                                  // define bubble sort
+void ls_l(char *argv, DIR *dirp, struct dirent *entry, char **file);                      // define ls -l function
+void ls_al(char *argv, DIR *dirp, struct dirent *entry, char **file);                     // define ls -al function
+void print_clients_info();//define print_clients_info function
+void handle_signal(int sig);//define handle_signal function
+pid_t child_make(int socketfd, struct sockaddr_in client_addr);//define child_make function
+void child_main(int socketfd, struct sockaddr_in client_addr);//define chile_main function
+
+static int maxNchildren;
+static pid_t *pids;
+
+struct client_info
+{
+    int num;
+    int pid;
+    int port;
+    char addr[30];
+    time_t connect_time;
+};//struct client info
+
+////////////////////////////////////////////////////////////
+//*doit1                                                  //
+//------------------------------------------------------  //
+//Purpose:idle process count +1                           //
+////////////////////////////////////////////////////////////
+void *doit1(void *vptr)//idle_count+1
+{
+    pthread_mutex_lock(&mutex);
+    idle_count[0]++;
+    pthread_mutex_unlock(&mutex);
+}   
+////////////////////////////////////////////////////////////
+//*doit2                                                  //
+//------------------------------------------------------  //
+//Purpose:idle process count -1                           //
+////////////////////////////////////////////////////////////
+void *doit2(void *vptr)//idle_count -1
+{
+    pthread_mutex_lock(&mutex);
+    idle_count[0]--;
+    pthread_mutex_unlock(&mutex);
+}
+
+
+////////////////////////////////////////////////////////////
+//client_info                                             //
+//------------------------------------------------------  //
+//Purpose:get client info                                 //
+////////////////////////////////////////////////////////////
+void client_info(struct sockaddr_in client_addr)
+{
+    share_history[idle_count[1]].pid = getpid();//get pid
+    inet_ntop(AF_INET, &(client_addr.sin_addr), share_history[idle_count[1]].addr, INET_ADDRSTRLEN);//get client ip
+    share_history[idle_count[1]].port = client_addr.sin_port;//get client port
+    share_history[idle_count[1]].connect_time = time(NULL);//get connection time
+
+    if (idle_count[1] < config.MaxHistory) {
+        idle_count[1]++;
+    } 
+    else {
+        for (int i = config.MaxHistory - 1; i > 0; i--) {
+            share_history[i] = share_history[i - 1];
+        }
+    }
+}
+////////////////////////////////////////////////////////////
+//sigint_handler                                          //
+//------------------------------------------------------  //
+//Purpose:handler in child when ctrl+c                    //
+////////////////////////////////////////////////////////////
+
+void sigint_handler(int signum)//in child
+{
+
+    
+    time_t now = time(NULL);//get time
+    if(idle_count[0]>=0)
+    {
+        printf("[%.24s] %ld process is terminated.\n",ctime(&(now)),(long)getpid());//print process is terminated
+        logfile = fopen("server_log.txt", "a");
+        if (logfile == NULL) {
+                perror("Fail\n");
+            }
+        fprintf(logfile,"[%.24s] %ld process is terminated.\n",ctime(&(now)),(long)getpid());//print process is terminated
+        fclose(logfile);
+    }
+    // pthread_create(&tidA,NULL,&doit2,NULL);
+    // pthread_join(tidA,NULL);
+    idle_count[0]--;
+    if(idle_count[0]>=0)
+    {   
+        printf("[%.24s] IdleProcessCount : %d\n",ctime(&(now)),idle_count[0]);
+        logfile = fopen("server_log.txt", "a");
+        if (logfile == NULL) {
+                perror("Fail\n");
+            }
+        fprintf(logfile,"[%.24s] IdleProcessCount : %d\n",ctime(&(now)),idle_count[0]);
+        fclose(logfile);
+    }
+    exit(0);//exit
+}
+#define KEY_VALUE1 50000
+////////////////////////////////////////////////////////////
+//sigint1_handler                                         //
+//------------------------------------------------------  //
+//Purpose:handler in parent when ctrl+c                   //
+////////////////////////////////////////////////////////////
+void sigint1_handler(int signum)//in parent
+{
+    int status;
+    time_t now = time(NULL);//get time
+    for(int i=0; i<maxNchildren; i++)
+    {
+        kill(pids[i],SIGINT);//kill child
+    }
+
+    while(waitpid(-1,&status,0)>0);//wait until child die
+
+    printf("[%.24s] Server is terminated.\n",ctime(&(now)));//print server is terminated
+    logfile = fopen("server_log.txt", "a");
+    if (logfile == NULL) {
+            perror("Fail\n");
+        }
+    fprintf(logfile,"[%.24s] Server is terminated.\n",ctime(&(now)));//print server is terminated
+    fclose(logfile);
+    exit(0);//exit
+}
+////////////////////////////////////////////////////////////
+//sigusr_handler2                                         //
+//------------------------------------------------------  //
+//Purpose:print idleprocesscount                          //
+////////////////////////////////////////////////////////////
+void sigusr_handler2(int signum)//print idleprocesscount
+{
+    time_t now=time(NULL);
+    printf("[%.24s] IdleProcessCount : %d\n",ctime(&(now)),idle_count[0]);
+    logfile = fopen("server_log.txt", "a");
+    if (logfile == NULL) {
+            perror("Fail\n");
+        }
+    fprintf(logfile,"[%.24s] IdleProcessCount : %d\n",ctime(&(now)),idle_count[0]);
+    fclose(logfile);
+}
+
+////////////////////////////////////////////////////////////
+//Main                                                    //
+//------------------------------------------------------  //
+//Output:0->Return a value of 0 to terminate the program  //
+//Purpose:Implement Multi-Access Web Server               //
+////////////////////////////////////////////////////////////
+int main()
+{   
+    semaphore = sem_open("semaphore",O_CREAT, 0777,1);
+
+    FILE* conf = fopen("httpd.conf", "r");//open httpd.conf file
+    if (conf == NULL) {
+        printf("Failed to open the file.\n");
+        return 0;
+    }
+
+    char line[100];
+    while (fgets(line, 100, conf) != NULL) 
+    {
+        if (line[strlen(line) - 1] == '\n') //remove \n
+        {
+            line[strlen(line) - 1] = '\0';//change to null
+        }
+
+        char* key = strtok(line, ":");
+        char* value = strtok(NULL, ":");
+
+        if (strcmp(key, "MaxChilds") == 0) 
+        {
+            config.MaxChilds = atoi(value);//get MaxChilds
+        } 
+        else if (strcmp(key, "MaxIdleNum") == 0) {
+            config.MaxIdleNum = atoi(value); //get MaxIdleNum
+        } 
+        else if (strcmp(key, "MinIdleNum") == 0) {
+            config.MinIdleNum = atoi(value); //get MinIdleNum
+        } 
+        else if (strcmp(key, "StartServers") == 0) {
+                config.StartServers = atoi(value); //get StartServers
+        } 
+        else if (strcmp(key, "MaxHistory") == 0) {
+            config.MaxHistory = atoi(value); //get MaxHistory
+        }
+    }
+    fclose(conf);//close httpd.conf file
+
+    if((shm_id = shmget((key_t)KEY_VALUE,MEM_SIZE,IPC_CREAT|0666))==-1) //make shared memory
+    {
+        printf("shmget fail\n");
+        return 0;
+    }
+
+    if((shm_addr = shmat(shm_id,(void*)0,0))==(void*)-1) //attach process
+    {
+        printf("shmat fail\n");
+        return 0;
+    }
+
+    if((shm_id1 = shmget((key_t)KEY_VALUE1,MEM_SIZE,IPC_CREAT|0666))==-1) //make shared memory
+    {
+        printf("shmget fail\n");
+        return 0;
+    }
+
+    if((shm_addr1 = shmat(shm_id1,(void*)0,0))==(void*)-1) //attach process
+    {
+        printf("shmat fail\n");
+        return 0;
+    }
+
+    idle_count = (int*)shm_addr;//idle count share memory
+
+    share_history = (struct client_info *)shm_addr1;//history share memory
+
+    struct sockaddr_in server_addr, client_addr; //server address, client address
+    int socket_fd;//socket descriptor
+    int opt = 1;
+
+    if ((socket_fd = socket(PF_INET, SOCK_STREAM, 0)) < 0) //Call the socket function to create a socket file descriptor
+    {
+        printf("Server : Can't open stream socket\n"); //exception
+        return 0;
+    }
+    setsockopt(socket_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)); //to enable reuse of previously used port numbers
+
+    bzero((char*)&server_addr , sizeof(server_addr)); //Initialize server_addr structurea
+    server_addr.sin_family = AF_INET; 
+    server_addr.sin_addr.s_addr = htonl(INADDR_ANY); //Accept client's connection request
+    server_addr.sin_port = htons(PORTNO);
+
+    if (bind(socket_fd, (struct sockaddr *)&server_addr, sizeof(server_addr)) < 0) //bind socket with ip, port
+    {
+        printf("Server : Can't bind local address\n"); //exception
+        return 0;
+    }
+    listen(socket_fd, 5); //wait client socket
+
+    signal(SIGALRM, handle_signal);//signal handler
+    alarm(10);//timer
+    
+
+    if(shmctl(shm_id,IPC_RMID,0)==-1)
+        printf("shmctl fail\n");
+
+    time_t now=time(NULL);
+    printf("[%.24s] Server is started.\n",ctime(&(now)));
+    logfile = fopen("server_log.txt", "a");
+    if (logfile == NULL) {
+            perror("Fail\n");
+        }
+    fprintf(logfile,"[%.24s] Server is started.\n",ctime(&(now)));
+    fclose(logfile);
+    logfile = fopen("server_log.txt", "a");
+    if (logfile == NULL) {
+            perror("Fail\n");
+        }
+    signal(SIGUSR2,sigusr_handler2);
+    fclose(logfile);
+
+    maxNchildren=5;
+    pids=(pid_t *)malloc(maxNchildren*sizeof(pid_t));
+
+    //pre-forking routine
+    for(int i=0;i<maxNchildren;i++)
+    {
+        pids[i] = child_make(socket_fd, client_addr);//parent returns   
+    }
+    int a = 0;
+    int b = 0;
+
+    while(1)
+        {
+            if(idle_count[0]<config.MinIdleNum) //when idle process count < minidlecount
+            {
+                for(int i=(idle_count[0]); i<5; i++)
+                {
+                    pids[a] = child_make(socket_fd,client_addr);
+                    a++;
+                }
+            }
+            if(idle_count[0]>config.MaxIdleNum)//when idle process count > maxidlecount
+                {
+                    for(int i=(idle_count[0]); i>5; i--)
+                    {
+                        kill(pids[b], SIGINT);
+                        idle_count[0]--;
+                        // pthread_create(&tidA,NULL,&doit2,NULL);
+                        // pthread_join(tidA,NULL);
+                        printf("[%.24s] IdleProcessCount : %d\n",ctime(&(now)),idle_count[0]);
+                        logfile = fopen("server_log.txt", "a");
+                        if (logfile == NULL) {
+                                perror("Fail\n");
+                            }
+                        fprintf(logfile,"[%.24s] IdleProcessCount : %d\n",ctime(&(now)),idle_count[0]);
+                        fclose(logfile);
+                        b++;
+                    }
+                }
+        }
+    sem_close(semaphore);
+    close(socket_fd); //close socket descriptor
+    return 0;
+}
+////////////////////////////////////////////////////////////
+//child_make                                              //
+//------------------------------------------------------  //
+//Purpose:make child process with fork                    //
+////////////////////////////////////////////////////////////
+pid_t child_make(int socket_fd, struct sockaddr_in client_addr)
+{
+    pid_t pid;
+
+    pid=fork();//fork
+    if (pid> 0) //parent
+    {
+        signal(SIGINT,sigint1_handler);
+        time_t now=time(NULL);
+        printf("[%.24s] %ld process is forked.\n",ctime(&(now)),(long)pid);
+        logfile = fopen("server_log.txt", "a");
+        if (logfile == NULL) {
+                perror("Fail\n");
+            }
+        fprintf(logfile,"[%.24s] %ld process is forked.\n",ctime(&(now)),(long)pid);
+        fclose(logfile);
+        // pthread_create(&tidA,NULL,&doit1,NULL);
+        // pthread_join(tidA,NULL);
+        idle_count[0]++;
+        printf("[%.24s] IdleProcessCount : %d\n",ctime(&(now)),idle_count[0]);
+        logfile = fopen("server_log.txt", "a");
+        if (logfile == NULL) {
+                perror("Fail\n");
+            }    
+        fprintf(logfile,"[%.24s] IdleProcessCount : %d\n",ctime(&(now)),idle_count[0]);
+        fclose(logfile);
+        return pid;
+    }
+    if(pid==0)
+        child_main(socket_fd,client_addr);
+}
+////////////////////////////////////////////////////////////
+//child_main                                              //
+//------------------------------------------------------  //
+//Purpose:print response about client request             //
+////////////////////////////////////////////////////////////
+void child_main(int socket_fd, struct sockaddr_in client_addr)
+{
+    struct sockaddr_in server_addr; //server address
+    int client_fd; //client descriptor
+    int len;
+    int opt = 1;
+    char cwd[4096];// get current directory
+    int ip_check=1;
+    int i=0;
+    
+    int byte_read; //return read function 
+    int file_fd; //file descriptor
+
+    DIR *dirp;             // pointer to directory stream
+    struct dirent *entry;  // Pointer to a dirent structure
+    char *file[4096];      // file list
+    struct stat buf[4096]; // stat structure that stores information about a file or directory
+
+    char MIME_type[BUFSIZE]; //check MIME_type
+
+    time_t now = time(NULL);
+
+    signal(SIGUSR2,sigusr_handler2);//call sigusr_handler2
+    signal(SIGINT,sigint_handler);//call sigint_handler
+
+    while(1)
+    {
+        struct in_addr inet_client_address;
+        struct timeval start,end;
+        long microsecond,second;
+        char buf[BUFSIZE] = {
+            0,
+        }; 
+        char tmp[BUFSIZE] = {
+            0,
+        };
+        char response_header[BUFSIZE] = {
+            0,
+        }; //response header
+        char response_message[BUFSIZE] = {
+            0,
+        }; //response message
+        char url[URL_LEN] = {
+            0,
+        }; //url
+        char method[20] = {
+            0,
+        }; //method
+        char *tok = NULL;
+    
+        if(strcmp(url,"/favicon.ico")==0)
+        {
+            continue;
+        }
+
+        len = sizeof(client_addr); //size of client address
+        client_fd = accept(socket_fd, (struct sockaddr *)&client_addr, &len); //to get the socket file descriptor associated with the client
+
+        gettimeofday(&start,NULL);
+
+        if (client_fd < 0)
+        {
+            printf("Server : accept failed\n"); //exception
+        }
+        
+        inet_client_address.s_addr = client_addr.sin_addr.s_addr; //store ip address
+        byte_read = read(client_fd, buf, BUFSIZE); //read client descriptor
+        if (byte_read == 0) //exception client was connected
+        {
+            continue;
+        }
+        
+        client_info(client_addr);//call client information
+
+        strcpy(tmp, buf); //tmp<-buf
+        tok = strtok(tmp, " ");
+        strcpy(method, tok); //Copy HTTP method information
+        if (strcmp(method, "GET") == 0) //when HTTP method == "GET"
+        {
+            tok = strtok(NULL, " ");  
+            strcpy(url, tok); //Copy url information
+        }
+        
+        puts("\n=============== New Client ================");
+        printf("Time : [%.24s]\n",ctime(&(share_history[0].connect_time)));//print time
+        printf("URL : %s\n",url);//print url
+        printf("IP : %s\n",inet_ntoa(inet_client_address));//print ip
+        printf("Port : %d\n",client_addr.sin_port);//print port
+        printf("PID : %d\n",getpid());//print pid
+        puts("===========================================\n");
+
+        logfile = fopen("server_log.txt", "a");
+        if (logfile == NULL) {
+                perror("Fail\n");
+            }
+
+        fprintf(logfile,"\n=============== New Client ================\n");
+        fprintf(logfile,"Time : [%.24s]\n",ctime(&(share_history[0].connect_time)));//print time
+        fprintf(logfile,"URL : %s\n",url);//print url
+        fprintf(logfile,"IP : %s\n",inet_ntoa(inet_client_address));//print ip
+        fprintf(logfile,"Port : %d\n",client_addr.sin_port);//print port
+        fprintf(logfile,"PID : %d\n",getpid());//print pid
+        fprintf(logfile,"===========================================\n\n");
+
+        fclose(logfile);
+        
+        // pthread_create(&tidA,NULL,&doit2,NULL);
+        // pthread_join(tidA,NULL);
+        idle_count[0]--;
+        kill(getppid(), SIGUSR2);
+
+        char wow[4096] = {0, };
+        getcwd(cwd, sizeof(cwd)); // get current working directory
+        sprintf(wow, "%s%s", cwd, url); //wow=cwd+url      
+
+        FILE* ip_info = fopen("accessible.usr", "r");//open file
+        char ip_list[1024];
+
+        while (fgets(ip_list, sizeof(ip_list), ip_info))//read file
+        {
+                if(len>0 && ip_list[len-1]=='\n')
+                {
+                    ip_list[len-1]='\0';//remove null
+                    --len;
+                }
+
+                if (fnmatch(ip_list, inet_ntoa(inet_client_address), 0) == 0)//when ip exist in file
+                {   
+                    ip_check=0;//control flag
+                    break;
+                }
+        }
+
+            if(ip_check!=0)//when no exist in file
+            {
+                sprintf(response_header, "HTTP/1.1 404 not found\r\n"
+                                            "Content-Type:text/html;charset=UTF-8\r\n\r\n"); //print response header
+                sprintf(response_message, "<h4>Access denied!</h4>""<br><h5>Your IP:%s</h5></br>""<br><h6>You have no permission to access this web server.</h6></br>""<br><h7>HTTP 403.6 - Forbidden: IP address rejected</h7></br>" ,inet_ntoa(inet_client_address));
+                write(client_fd, response_header, strlen(response_header)); //write response message
+                write(client_fd, response_message, strlen(response_message)); //write response message
+                close(client_fd); //close socket
+            }
+            
+            struct stat check_buf;
+            int exsist_file = lstat(wow,&check_buf); //get file info
+            
+            if (opendir(wow)) //open directory
+            {
+                if (strcmp(url, "/") == 0)
+                {
+                    ls_l(url, dirp, entry, file); // call ls -l function
+                }
+                else
+                {
+                    ls_al(url, dirp, entry, file); // call ls -al function
+                }
+            }
+
+            if (!opendir(wow)) //not directory
+            {
+                if (access(wow, F_OK) >= -1) //no exist file
+                    {
+                        sprintf(temp, "<h3><br>Not Found</br></h3>The request URL %s was not found on this server<p>HTTP 404 -Page Not Found</p>", url); //print 404 error
+                    }
+            }
+
+            lstat(wow,&check_buf); //get file info
+            long size; //lont type size
+
+            if (S_ISDIR(check_buf.st_mode)) //when directory
+            {
+        
+                strcpy(MIME_type, "text/html"); //MIME_type=text/html
+                size=strlen(response_message); //get size of response message
+                strcpy(response_message, temp); //response message=temp
+                memset(temp, 0, sizeof(temp)); //initailize temp
+                sprintf(response_header, "HTTP/1.0 200 OK\r\n"
+                                        "Server:2023 simple web server \r\n"
+                                        "Content-length:%lu\r\n"
+                                        "Content-type:%s\r\n\r\n",
+                                        size, MIME_type); //print response header
+                
+                write(client_fd, response_header, strlen(response_header)); //write response header
+                write(client_fd, response_message, strlen(response_message)); //write response message
+            }
+            else if((fnmatch("*.jpg",wow, FNM_CASEFOLD)==0)||
+            (fnmatch("*.png",wow, FNM_CASEFOLD)==0)||
+            (fnmatch("*.jpeg",wow, FNM_CASEFOLD)==0)) //when image file
+            {
+                char buffer[BUFSIZE] = {0, };
+                FILE* file_open = fopen(wow, "rb"); //file open
+                
+                fseek(file_open, 0, SEEK_END); //get file
+                long int size = ftell(file_open);
+                fseek(file_open, 0, SEEK_SET);
+
+                sprintf(response_header, "HTTP/1.1 200 OK\r\nContent-Type: image/*\r\nContent-Length:%ld\r\n\r\n",size);//save message
+                write(client_fd, response_header, strlen(response_header)); //write response header
+
+                int file_read = 0;
+                while ((file_read = fread(buffer, 1, BUFSIZE, file_open)) > 0) //file read and write 
+                {
+                    write(client_fd, buffer, file_read);
+                }
+                
+                fclose(file_open); //close files
+            }
+
+            else if (S_ISREG(check_buf.st_mode)) //when file
+            {
+                char buffer[BUFSIZE] = {0, };
+                FILE* file_open = fopen(wow, "rb"); //file open
+                
+                fseek(file_open, 0, SEEK_END); //get file
+                long int size = ftell(file_open);
+                fseek(file_open, 0, SEEK_SET);
+
+                sprintf(response_header, "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length:%ld\r\n\r\n",size);//save message
+                write(client_fd, response_header, strlen(response_header)); //write response header
+
+                int num_read = 0;
+                while ((num_read = fread(buffer, 1, BUFSIZE, file_open)) > 0) //file read and write
+                {
+                    write(client_fd, buffer, num_read);
+                }
+
+                fclose(file_open); //close files
+            }
+
+            gettimeofday(&end,NULL);
+
+            second = end.tv_sec - start.tv_sec;
+            microsecond = end.tv_usec - start.tv_usec;
+
+            long total_microsecond = second*1000000 + microsecond;
+
+
+            sleep(5);
+
+            puts("\n=========== Disconnected Client ===========");
+            printf("Time : [%.24s]\n",ctime(&(share_history[0].connect_time)));//print time
+            printf("URL : %s\n",url);//print url
+            printf("IP : %s\n",inet_ntoa(inet_client_address));//print ip
+            printf("Port : %d\n",client_addr.sin_port);//print port
+            printf("PID : %d\n",getpid());//print pid
+            printf("CONNECTING TIME : %ld(us)\n",total_microsecond);
+            puts("===========================================\n");
+
+            logfile = fopen("server_log.txt", "a");
+            if (logfile == NULL) {
+                    perror("Fail\n");
+                }
+
+            fprintf(logfile,"\n=========== Disconnected Client ===========\n");
+            fprintf(logfile,"Time : [%.24s]\n",ctime(&(share_history[0].connect_time)));//print time
+            fprintf(logfile,"URL : %s\n",url);//print url
+            fprintf(logfile,"IP : %s\n",inet_ntoa(inet_client_address));//print ip
+            fprintf(logfile,"Port : %d\n",client_addr.sin_port);//print port
+            fprintf(logfile,"PID : %d\n",getpid());//print pid
+            fprintf(logfile,"CONNECTING TIME : %ld(us)\n",total_microsecond);
+            fprintf(logfile,"===========================================\n\n");
+
+            fclose(logfile);
+
+            // pthread_create(&tidA,NULL,&doit1,NULL);
+            // pthread_join(tidA,NULL);
+            idle_count[0]++; 
+            kill(getppid(), SIGUSR2);
+            close(client_fd); //close cient socket descriptor
+    }
+    close(socket_fd);//close server socket descriptor
+}
+////////////////////////////////////////////////////////////
+//print_clients_info                                      //
+//------------------------------------------------------  //
+//Purpose:print client information                        //
+////////////////////////////////////////////////////////////
+void print_clients_info() {
+    int k=1;
+    printf("\n=================== Connection History ===================\n");
+    printf("No.\tIP\t\tPID\tPort\tTime\n"); 
+    for (int i = idle_count[1] - 1; i >= 0; i--) {
+        printf("%d\t%s\t%d\t%d\t%s", k++ , share_history[i].addr, share_history[i].pid,  share_history[i].port, ctime(&(share_history[i].connect_time)));//print client information
+    }
+}
+
+////////////////////////////////////////////////////////////
+//handle_signal                                           //
+//------------------------------------------------------  //
+//Purpose:call print_clients_info function and set alarm  //
+////////////////////////////////////////////////////////////
+void handle_signal(int sig)
+{
+    if (sig == SIGALRM) 
+    {
+        print_clients_info();//call print_clients_info
+    }
+    alarm(10);//timer
+}
+//////////////////////////////////////////////////////////////////////////////////////////
+// file_info                                                                            //
+//-------------------------------------------------------                               //
+// Input:int lflag,aflag, int k: the number of files, struct stat: get file information //
+//           char* file[]:file list int argc:store the number of input arguments        //
+//           struct passwd *:get user info struct group *:get group info                //
+//           struct tm*:get time info                                                   //
+// Purpose:print directory's more information                                           //
+//////////////////////////////////////////////////////////////////////////////////////////
+void file_info(int lflag, int aflag, char *argv, int k, struct stat buf[], char *file[]) // define file info function
+{
+    char permission[] = "----------";                                                                     // initialize permission array
+    char *Month[] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"}; // initialize month array
+    int n;                                                                                                // initialize value
+    char cwd[4096];
+
+    struct passwd *pw; //passwd structure
+    struct group *grp; //group stucture
+    struct tm *time; //time structure
+    getcwd(cwd, 4096); // get current directory
+
+    sprintf(temp,"%s<title>%s</title>",temp,cwd); //print title current directory
+    sprintf(temp, "%s<table border=\"1\">", temp); // make table
+    sprintf(temp, "%s<tr><th>Name</th><th>Permission</th><th>Link</th><th>Owner</th><th>Group</th><th>Size</th><th>Last Modified</th></tr>", temp); // make header
+
+    for (n = 0; n < k; n++)
+    {
+        if (S_ISREG(buf[n].st_mode))
+            permission[0] = '-'; // regular file-> - 
+        else if (S_ISDIR(buf[n].st_mode))
+            permission[0] = 'd'; // directory-> d
+        else if (S_ISCHR(buf[n].st_mode))
+            permission[0] = 'c'; // character special-> c
+        else if (S_ISBLK(buf[n].st_mode))
+            permission[0] = 'b'; // block special-> b
+        else if (S_ISFIFO(buf[n].st_mode))
+            permission[0] = 'p'; // FIFO -> p
+        else if (S_ISLNK(buf[n].st_mode))
+            permission[0] = 'l';
+        else if (S_ISSOCK(buf[n].st_mode))
+            permission[0] = 's'; // socket-> s
+
+        if (buf[n].st_mode & S_IRUSR)
+        {
+            permission[1] = 'r'; // owner has read permission
+        }
+        else
+        {
+            permission[1] = '-'; // owner has no read permission
+        }
+        if (buf[n].st_mode & S_IWUSR)
+        {
+            permission[2] = 'w'; // owner has write permission
+        }
+        else
+        {
+            permission[2] = '-'; // owner has no write permission
+        }
+        if (buf[n].st_mode & S_IXUSR)
+        {
+            permission[3] = 'x'; // owner has execute permission
+        }
+        else
+        {
+            permission[3] = '-'; // owner has no execute permission
+        }
+        if (buf[n].st_mode & S_IRGRP)
+        {
+            permission[4] = 'r'; // group has read permission
+        }
+        else
+        {
+            permission[4] = '-'; // group has no read permission
+        }
+        if (buf[n].st_mode & S_IWGRP)
+        {
+            permission[5] = 'w'; // group has write permission
+        }
+        else
+        {
+            permission[5] = '-'; // group has no write permission
+        }
+        if (buf[n].st_mode & S_IXGRP)
+        {
+            permission[6] = 'x'; // group has execute permission
+        }
+        else
+        {
+            permission[6] = '-'; // group has no execute permission
+        }
+        if (buf[n].st_mode & S_IROTH)
+        {
+            permission[7] = 'r'; // others have read permission
+        }
+        else
+        {
+            permission[7] = '-'; // others have no read permission
+        }
+        if (buf[n].st_mode & S_IWOTH)
+        {
+            permission[8] = 'w'; // others have write permission
+        }
+        else
+        {
+            permission[8] = '-'; // others have no write permission
+        }
+        if (buf[n].st_mode & S_IXOTH)
+        {
+            permission[9] = 'x'; // others have execute permission
+        }
+        else
+        {
+            permission[9] = '-'; // others have no execute permission
+        }
+
+        pw = getpwuid(buf[n].st_uid);              // get File Owner's Information
+        grp = getgrgid(buf[n].st_gid);             // get the information of the file's owning group
+        const time_t *modiTime = &buf[n].st_mtime; // to get the last modified time of that file
+        time = localtime(modiTime);                // function for Parsing Time Information
+
+        if (lflag == 1 && aflag == 0) //when root directory
+        {
+            if (permission[0] == 'd')
+            {
+                sprintf(temp, "%s<tr style=\"color:blue\"><td><a href=\"%s\">%s</a></td><td>%s</td><td>%li</td><td>%s</td><td>%s</td><td>%li</td><td>%s\t%-d\t%02d : %02d</td></tr>", temp, file[n], file[n], permission, buf[n].st_nlink, pw->pw_name, grp->gr_name, buf[n].st_size, Month[time->tm_mon], time->tm_mday, time->tm_hour, time->tm_min); // direcotory blue color
+            }
+            else if (permission[0] == 'l')
+            {
+                sprintf(temp, "%s<tr style=\"color:green\"><td><a href=\"%s\">%s</a></td><td>%s</td><td>%li</td><td>%s</td><td>%s</td><td>%li</td><td>%s\t%-d\t%02d : %02d</td></tr>", temp, file[n], file[n], permission, buf[n].st_nlink, pw->pw_name, grp->gr_name, buf[n].st_size, Month[time->tm_mon], time->tm_mday, time->tm_hour, time->tm_min); // link green color
+            }
+            else
+            {
+                sprintf(temp, "%s<tr style=\"color:red\"><td><a href=\"%s\">%s</a></td><td>%s</td><td>%li</td><td>%s</td><td>%s</td><td>%li</td><td>%s\t%-d\t%02d : %02d</td></tr>", temp, file[n], file[n], permission, buf[n].st_nlink, pw->pw_name, grp->gr_name, buf[n].st_size, Month[time->tm_mon], time->tm_mday, time->tm_hour, time->tm_min); // file red color
+            }
+        }
+        else if (lflag == 0 && aflag == 1) //when sub directory
+        {
+            if (argv[strlen(argv) - 1] == '/') // When the '/' is at the end of the address
+            {
+                if (permission[0] == 'd')
+                {
+                    sprintf(temp, "%s<tr style=\"color:blue\"><td><a href=\"%s%s\">%s</a></td><td>%s</td><td>%li</td><td>%s</td><td>%s</td><td>%li</td><td>%s\t%-d\t%02d : %02d</td></tr>", temp, argv, file[n], file[n], permission, buf[n].st_nlink, pw->pw_name, grp->gr_name, buf[n].st_size, Month[time->tm_mon], time->tm_mday, time->tm_hour, time->tm_min); // directory blue color
+                }
+                else if (permission[0] == 'l')
+                {
+                    sprintf(temp, "%s<tr style=\"color:green\"><td><a href=\"%s%s\">%s</a></td><td>%s</td><td>%li</td><td>%s</td><td>%s</td><td>%li</td><td>%s\t%-d\t%02d : %02d</td></tr>", temp, argv, file[n], file[n], permission, buf[n].st_nlink, pw->pw_name, grp->gr_name, buf[n].st_size, Month[time->tm_mon], time->tm_mday, time->tm_hour, time->tm_min); // link green color
+                }
+                else
+                {
+                    sprintf(temp, "%s<tr style=\"color:red\"><td><a href=\"%s%s\">%s</a></td><td>%s</td><td>%li</td><td>%s</td><td>%s</td><td>%li</td><td>%s\t%-d\t%02d : %02d</td></tr>", temp, argv, file[n], file[n], permission, buf[n].st_nlink, pw->pw_name, grp->gr_name, buf[n].st_size, Month[time->tm_mon], time->tm_mday, time->tm_hour, time->tm_min); // file red color
+                }
+            }
+            else //When there is no '/' at the end of the address
+            {
+                if (permission[0] == 'd')
+                {
+                    sprintf(temp, "%s<tr style=\"color:blue\"><td><a href=\"%s/%s\">%s</a></td><td>%s</td><td>%li</td><td>%s</td><td>%s</td><td>%li</td><td>%s\t%-d\t%02d : %02d</td></tr>", temp, argv, file[n], file[n], permission, buf[n].st_nlink, pw->pw_name, grp->gr_name, buf[n].st_size, Month[time->tm_mon], time->tm_mday, time->tm_hour, time->tm_min); // directory blue color
+                }
+                else if (permission[0] == 'l')
+                {
+                    sprintf(temp, "%s<tr style=\"color:green\"><td><a href=\"%s/%s\">%s</a></td><td>%s</td><td>%li</td><td>%s</td><td>%s</td><td>%li</td><td>%s\t%-d\t%02d : %02d</td></tr>", temp, argv, file[n], file[n], permission, buf[n].st_nlink, pw->pw_name, grp->gr_name, buf[n].st_size, Month[time->tm_mon], time->tm_mday, time->tm_hour, time->tm_min); // link green color
+                }
+                else
+                {
+                    sprintf(temp, "%s<tr style=\"color:red\"><td><a href=\"%s/%s\">%s</a></td><td>%s</td><td>%li</td><td>%s</td><td>%s</td><td>%li</td><td>%s\t%-d\t%02d : %02d</td></tr>", temp, argv, file[n], file[n], permission, buf[n].st_nlink, pw->pw_name, grp->gr_name, buf[n].st_size, Month[time->tm_mon], time->tm_mday, time->tm_hour, time->tm_min); // file red color
+                }
+            }
+        }
+    }
+    sprintf(temp, "%s</table>", temp); //close table
+}
+///////////////////////////////////////////////////////////
+//Bubble sort                                            //
+//-------------------------------------------------------//
+//Input:char**files:file in which the filename is stored //
+//      int n:length of file                             //
+//      struct stat buf[]: get information               //
+//Purpose:Sorts the names of files and directories       //
+///////////////////////////////////////////////////////////
+void bubble_sort(char **file, int n, struct stat buf[]) // define bubble function
+{                          
+    int i, j;              // initialize value
+    struct stat temp_size; 
+    for (i = 0; i < n - 1; i++) // Bubble sort the file names alphabetically
+    {
+        for (j = 0; j < n - i - 1; j++) // if files[j]>files[j+1]
+        { 
+            if (strcasecmp(file[j], file[j + 1]) > 0)
+            {
+                char *temp = file[j];
+                file[j] = file[j + 1];
+                file[j + 1] = temp; // Swap the previous and next elements of an array
+
+                temp_size = buf[j];
+                buf[j] = buf[j + 1];
+                buf[j + 1] = temp_size; // Swap the previous and next elements of an array
+            } // end of if
+        } // end of for
+    } // end of for
+}
+///////////////////////////////////////////////////////////////////////////////
+//ls_l                                                                       //
+//-------------------------------------------------------                    //
+//Input:DIR*:directory pointer, struct dirent* :directory stream             //
+//          char**:file list int argc:store the number of input arguments    //
+//          char*argv:url                                                    //
+//Purpose:print directory & file names & file information                    //
+///////////////////////////////////////////////////////////////////////////////
+void ls_l(char *argv, DIR *dirp, struct dirent *entry, char **file) // define ls -l function
+{
+    int lflag = 1;
+    int aflag = 0;
+    int i = 0;             // initialize value
+    int total = 0;         // initialize value
+    struct stat buf[4096]; // stat structure that stores information about a file or directory
+
+    char cwd[4096];           // declare cwd
+    getcwd(cwd, sizeof(cwd)); // cwd:current directory
+    char cwd_copy[4096];
+    char cwd_copy_copy[4096];
+    strcpy(cwd_copy, cwd); // copy current directory
+
+    if ((dirp = opendir(cwd)) != NULL) // open directory
+    {
+        while ((entry = readdir(dirp)) != NULL) // read directory
+        {
+            if (entry->d_name[0] == '.') // do not print hidden files
+            {
+                continue;
+            }
+            else
+            {
+                file[i] = entry->d_name; // store file names
+                i++;
+            }
+        }
+
+        for (int j = 0; j < i; j++)
+        {
+            strcpy(cwd_copy_copy, cwd_copy); //cwd copy copy=current directory+url
+            strcat(cwd_copy_copy, "/"); //cwd copy copy=current directory+url+/
+            lstat(strcat(cwd_copy_copy, file[j]), &buf[j]); //get info about current directory+url+/+file
+            total += buf[j].st_blocks; // get block size
+            memset(cwd_copy_copy, 0, sizeof(cwd_copy_copy)); //initialize cwd_copy_copy
+        }
+
+        sprintf(temp, "<h1>Welcome to System Programming Http</h1><br>"
+                      "<B>Directory path : %s<br>"
+                      "total %d</B><br>",
+                cwd, total / 2); //print directory path & total size
+        bubble_sort(file, i, buf);                   // call bubble_sort function
+        file_info(lflag, aflag, argv, i, buf, file); // print file info
+    }
+    closedir(dirp); // close directory
+}
+///////////////////////////////////////////////////////////////////////////////
+//ls_al                                                                      //
+//-------------------------------------------------------                    //
+//Input:DIR*:directory pointer, struct dirent* :directory stream             //
+//          char**:file list int argc:store the number of input arguments    //
+//          char*argv:url                                                    //
+//Purpose:print directory & file names & file information with hidden files  //
+///////////////////////////////////////////////////////////////////////////////
+void ls_al(char *argv, DIR *dirp, struct dirent *entry, char **file) // define ls -al function
+{
+    int aflag = 1;
+    int lflag = 0;
+    int i = 0;             // initialize value
+    int total = 0;         // initialize value
+    struct stat buf[4096]; // stat structure that stores information about a file or directory
+    struct stat check_buf;
+
+    char cwd[4096];           // declare cwd
+    getcwd(cwd, sizeof(cwd)); // cwd:current directory
+    char cwd_copy[4096];
+    char cwd_copy_copy[4096];
+    strcpy(cwd_copy, cwd); //cwd copy=curernt directory
+    strcat(cwd_copy, argv); //cwd copy=current directory+url
+
+    if ((dirp = opendir(cwd_copy)) != NULL) //open directory
+    {
+        while ((entry = readdir(dirp)) != NULL) //read directory
+        {
+            file[i] = entry->d_name; //store file list
+            i++; // i=how many files in directory
+        }
+
+        for (int j = 0; j < i; j++)
+        {
+            strcpy(cwd_copy_copy, cwd_copy); //cwd copy copy=current directory+url
+            strcat(cwd_copy_copy, "/"); //cwd copy copy=current directory+url+/
+            lstat(strcat(cwd_copy_copy, file[j]), &buf[j]); //get info about current directory+url+/+file
+            total += buf[j].st_blocks; // get block size
+            memset(cwd_copy_copy, 0, sizeof(cwd_copy_copy)); //initialize cwd_copy_copy
+        }
+
+        sprintf(temp, "<h2>System Programming Http</h2><br>"
+                      "<B>Directory path : %s<br>"
+                      "total %d</B><br>",
+                        cwd_copy, total / 2); //print directory path & toatl size
+
+        bubble_sort(file, i, buf);                   // call bubble_sort function
+        file_info(lflag, aflag, argv, i, buf, file); // print file info
+    }
+    closedir(dirp); // close directory
+}

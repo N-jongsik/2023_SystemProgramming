@@ -1,0 +1,197 @@
+int main()
+{
+    declare server address, client address
+    declare socket descriptor, client descriptor
+
+    declare pointer to directory stream and Pointer to a dirent structure
+    declare file list stat structure that stores information about a file or director
+
+    Call the socket function to create a socket file descriptor
+    Call setsocketopt to enable reuse of previously used port numbers
+    Initialize server_addr structure
+    Save address information for the server socket
+
+    Bind a socket with socket_fd to the IP address and port number specified in the server_addr structure
+    Socket wait to accept incoming connections from client sockets.
+
+    while (1)
+    {
+        Define variables required to process client requests
+    
+        define size of client address
+        get the socket file descriptor associated with the client
+
+        store ip address
+
+        Make an exception when read function return 0
+
+        Copy HTTP method information and url information
+
+        get current working directory
+        get path of wow (wow=cwd+url)
+
+        get information of files 
+        
+        open directory
+        {
+            when root directory
+            {
+                call ls -l function
+            }
+            when sub directory
+            {
+                call ls -al function
+            }
+        }
+
+        whwen not directory
+        {
+           no exsist file
+            {
+                print 404 error
+            }
+        }
+
+        get file info
+
+        when directory
+        {
+            MIME_type=text/html
+            get size of response message
+        }
+        when image file
+        {
+            MIME_type=image/*
+            get file size
+            file open
+            file read
+        }
+        when file
+        {
+            MIME_type=text/plain
+            get file size
+            file open
+            file read
+        }  
+        
+        when not image file
+        {
+            response message=temp
+        }
+        initailize temp
+        print response header
+        write response header
+
+        when image file
+        {
+            write response message
+        }
+        when not image file
+        {
+            write response message
+        }
+        
+        print the client's IP address and port number
+        close file descriptor
+        close client socket descriptor
+    }
+    close socket descriptor
+    exit
+}
+define file info function about directory
+{
+    get current directory
+
+    print title current directory
+    make table
+    make header
+
+    for (n = 0; n < k; n++)
+    {
+        judge file mode and permission
+
+        get File Owner's Information
+        get the information of the file's owning group
+        get the last modified time of that file
+        function for Parsing Time Information
+
+        /when root directory
+        {
+                when directory hyperlink with blue color :file[n]
+                when link file hyperlink with green color :file[n]
+		    when file hyperlink with red color :file[n]
+        }
+        when sub directory
+        {
+            When the '/' is at the end of the address
+            {
+                when directory hyperlink with blue color :url file[n]
+                when link file hyperlink with green color :url file[n]
+		    when file hyperlink with red color :url file[n]
+            }
+            When there is no '/' at the end of the address
+            {
+                when directory hyperlink with blue color :url/file[n]
+                when link file hyperlink with green color :url/file[n]
+		    when file hyperlink with red color :url/file[n]
+            }
+        }
+    }
+    close table
+}
+define bubble sort function
+{                          
+    initialize value 
+    Bubble sort the file names alphabetically
+}
+define ls -l function
+{
+    get current directory
+    get current directory+url
+
+    when open directory
+    {
+        Repeat read directory
+        {
+            store file names without hidden files
+        }
+
+        for (int j = 0; j < i; j++)
+        {
+            get current directory+url+/
+            get info about current directory+url+/+file
+            get block size
+            initialize current directory+url+/+file
+        }
+        print directory path & total size
+        call bubble_sort function
+        print file info
+    }
+
+    close directory
+}
+define ls -al function
+{
+    get current directory
+    get current directory+url
+
+    when open directory+url
+    {
+        Repeat read directory
+        {
+            store file list with hidden file
+        }
+
+        for (int j = 0; j < i; j++)
+        {
+            get current directory+url+/
+            get info about current directory+url+/+file
+            get block size
+            initialize current directory+url+/+file
+        }
+        print directory path & toatl size
+        call bubble_sort function
+        print file info
+    }
+    close directory
+}
